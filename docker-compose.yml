@@ -1,0 +1,17 @@
+
+services:
+  document-parser:
+    build: .
+    container_name: document-parser
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./app:/app
+      - uploaded_files:/app/uploads
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+      - UPLOAD_FOLDER=/app/uploads
+
+volumes:
+  uploaded_files:
