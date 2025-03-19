@@ -17,7 +17,7 @@ from flask import Flask, request, jsonify, render_template, send_file
 
 class DocumentParser:
 
-    def __init__(self, language_list=None, chunk_size=1000, overlap=True):
+    def __init__(self, language_list=None, chunk_size=1000, overlap=True, overlap_limit=200):
 
         if language_list is None:
             language_list = ['ch_sim', 'en']  # 默认支持中文和英文
@@ -25,6 +25,7 @@ class DocumentParser:
         self.languages = language_list
         self.chunk_size = chunk_size
         self.overlap = overlap
+        self.overlap_limit = overlap_limit  # 新增：重叠字数上限
 
     def parse(self, file_path, chunk_size=None):
         if chunk_size is not None:
@@ -69,9 +70,8 @@ class DocumentParser:
                 if page_text_from_ocr.strip():
                     page_text = page_text_from_ocr
 
-            if self.overlap and last_sentence is not None:
-                if not page_text.strip().startswith(last_sentence.strip()):
-                    page_text = last_sentence + " " + page_text
+            # 应用重叠逻辑
+            page_text = self._apply_overlap(page_text, last_sentence)
 
             page_segments = self.segment_text(page_text, self.chunk_size)
 
@@ -104,9 +104,8 @@ class DocumentParser:
                     image_text = ' '.join([text for _, text, _ in ocr_results])
 
                     if image_text.strip():
-                        if self.overlap and last_image_sentence is not None:
-                            if not image_text.strip().startswith(last_image_sentence.strip()):
-                                image_text = last_image_sentence + " " + image_text
+                        # 应用重叠逻辑
+                        image_text = self._apply_overlap(image_text, last_image_sentence or last_sentence)
 
                         ocr_segments = self.segment_text(image_text, self.chunk_size)
 
@@ -164,9 +163,8 @@ class DocumentParser:
             if table_text:
                 combined_text = '\n'.join(table_text)
 
-                if self.overlap and last_sentence is not None:
-                    if not combined_text.strip().startswith(last_sentence.strip()):
-                        combined_text = last_sentence + " " + combined_text
+                # 应用重叠逻辑
+                combined_text = self._apply_overlap(combined_text, last_sentence)
 
                 table_segments = self.segment_text(combined_text, self.chunk_size)
 
@@ -207,11 +205,8 @@ class DocumentParser:
             if slide_text:
                 combined_text = '\n'.join(slide_text)
 
-                # 如果有上一张幻灯片的最后一句，并且启用了重叠
-                if self.overlap and last_sentence is not None:
-                    # 检查当前文本是否已经以last_sentence开头
-                    if not combined_text.strip().startswith(last_sentence.strip()):
-                        combined_text = last_sentence + " " + combined_text
+                # 应用重叠逻辑，确保即使在空白幻灯片后也能正确处理
+                combined_text = self._apply_overlap(combined_text, last_sentence)
 
                 slide_segments = self.segment_text(combined_text, self.chunk_size)
 
@@ -249,11 +244,8 @@ class DocumentParser:
             if sheet_data:
                 combined_text = '\n'.join(sheet_data)
 
-                # 如果有上一个表格的最后一句，并且启用了重叠
-                if self.overlap and last_sentence is not None:
-                    # 检查当前文本是否已经以last_sentence开头
-                    if not combined_text.strip().startswith(last_sentence.strip()):
-                        combined_text = last_sentence + " " + combined_text
+                # 应用重叠逻辑
+                combined_text = self._apply_overlap(combined_text, last_sentence)
 
                 sheet_segments = self.segment_text(combined_text, self.chunk_size)
 
@@ -277,6 +269,7 @@ class DocumentParser:
         """解析CSV文件"""
         text_segments = []
         rows = []
+        last_sentence = None  # 添加用于CSV的last_sentence追踪
 
         with open(file_path, 'r', newline='', encoding='utf-8', errors='ignore') as csvfile:
             csv_reader = csv.reader(csvfile)
@@ -286,7 +279,18 @@ class DocumentParser:
 
         if rows:
             combined_text = '\n'.join(rows)
+
+            # 应用重叠逻辑 (新增)
+            combined_text = self._apply_overlap(combined_text, last_sentence)
+
             csv_segments = self.segment_text(combined_text, self.chunk_size)
+
+            if csv_segments:
+                # 更新last_sentence (新增)
+                last_segment = csv_segments[-1]
+                last_sentences = self.split_into_sentences(last_segment)
+                if last_sentences:
+                    last_sentence = last_sentences[-1]
 
             for segment in csv_segments:
                 text_segments.append({
@@ -295,6 +299,47 @@ class DocumentParser:
                 })
 
         return text_segments
+
+    def _apply_overlap(self, current_text, last_sentence):
+        """
+        应用重叠逻辑的统一方法，确保各文件类型一致处理重叠
+
+        Args:
+            current_text: 当前要处理的文本
+            last_sentence: 上一段落/文件的最后一句话
+
+        Returns:
+            应用重叠后的文本
+        """
+        if not current_text.strip() or not self.overlap or last_sentence is None:
+            return current_text
+
+        # 确保current_text不是空的
+        current_text = current_text.strip()
+        last_sentence = last_sentence.strip()
+
+        # 检查current_text是否已经以last_sentence开始
+        if current_text.startswith(last_sentence):
+            return current_text
+
+        # 如果last_sentence太长，截取到不超过overlap_limit的长度
+        if len(last_sentence) > self.overlap_limit:
+            # 尝试在单词边界截断
+            words = last_sentence.split()
+            truncated = ""
+            for word in words:
+                if len(truncated + word) < self.overlap_limit:
+                    truncated += word + " "
+                else:
+                    break
+            last_sentence = truncated.strip()
+
+            # 如果没有成功在单词边界截断，直接截取
+            if len(last_sentence) > self.overlap_limit:
+                last_sentence = last_sentence[:self.overlap_limit]
+
+        # 应用重叠
+        return last_sentence + " " + current_text
 
     def split_into_sentences(self, text):
         """
@@ -415,8 +460,13 @@ class DocumentParser:
 
                 # 如果设置了重叠，将该句子作为下一段的第一句
                 if self.overlap and last_sentence:
-                    current_chunk = [last_sentence]
-                    current_length = len(last_sentence) + 1  # +1 for space
+                    # 应用重叠限制
+                    overlap_sentence = last_sentence
+                    if len(overlap_sentence) > self.overlap_limit:
+                        overlap_sentence = overlap_sentence[:self.overlap_limit]
+
+                    current_chunk = [overlap_sentence]
+                    current_length = len(overlap_sentence) + 1  # +1 for space
                 continue
 
             # 检查添加当前句子是否会超过最大长度
@@ -427,8 +477,14 @@ class DocumentParser:
                 # 如果设置了重叠，使用当前段落的最后一句作为下一段落的第一句
                 if self.overlap:
                     last_sentence = current_chunk[-1]
-                    current_chunk = [last_sentence]
-                    current_length = len(last_sentence) + 1  # +1 for space
+
+                    # 应用重叠限制
+                    overlap_sentence = last_sentence
+                    if len(overlap_sentence) > self.overlap_limit:
+                        overlap_sentence = overlap_sentence[:self.overlap_limit]
+
+                    current_chunk = [overlap_sentence]
+                    current_length = len(overlap_sentence) + 1  # +1 for space
                 else:
                     current_chunk = []
                     current_length = 0
@@ -478,11 +534,8 @@ class DocumentParser:
                 try:
                     ocr_text = self.extract_text_from_image(temp_image_path)
                     if ocr_text.strip():
-                        # 如果启用了重叠模式，且有上一段的最后一句
-                        if self.overlap and last_sentence is not None:
-                            # 确保不重复添加相同的句子
-                            if not ocr_text.strip().startswith(last_sentence.strip()):
-                                ocr_text = last_sentence + " " + ocr_text
+                        # 应用重叠逻辑
+                        ocr_text = self._apply_overlap(ocr_text, last_sentence)
 
                         # 对OCR结果进行分段
                         ocr_segments = self.segment_text(ocr_text, self.chunk_size)
@@ -509,7 +562,7 @@ class DocumentParser:
 
 
 # 新增: 处理多个文档的函数
-def process_multiple_documents(file_paths, languages=None, chunk_size=1000, overlap=True):
+def process_multiple_documents(file_paths, languages=None, chunk_size=1000, overlap=True, overlap_limit=200):
     """
     处理多个文档并返回其分段内容
 
@@ -518,6 +571,7 @@ def process_multiple_documents(file_paths, languages=None, chunk_size=1000, over
         languages: OCR支持的语言列表
         chunk_size: 每个文本块的最大字符数
         overlap: 是否启用重叠模式
+        overlap_limit: 重叠文本的最大字符数
 
     Returns:
         以文件路径为键，分段内容为值的字典
@@ -525,7 +579,8 @@ def process_multiple_documents(file_paths, languages=None, chunk_size=1000, over
     if languages is None:
         languages = ['ch_sim', 'en']  # 默认支持中文和英文
 
-    parser = DocumentParser(language_list=languages, chunk_size=chunk_size, overlap=overlap)
+    parser = DocumentParser(language_list=languages, chunk_size=chunk_size, overlap=overlap,
+                            overlap_limit=overlap_limit)
     results = {}
 
     for file_path in file_paths:
@@ -539,7 +594,7 @@ def process_multiple_documents(file_paths, languages=None, chunk_size=1000, over
 
 
 # 原始的单文件处理函数
-def process_document(file_path, languages=None, chunk_size=1000, overlap=True):
+def process_document(file_path, languages=None, chunk_size=1000, overlap=True, overlap_limit=200):
     """
     处理文档并返回其分段内容
 
@@ -548,10 +603,12 @@ def process_document(file_path, languages=None, chunk_size=1000, overlap=True):
         languages: OCR支持的语言列表
         chunk_size: 每个文本块的最大字符数
         overlap: 是否启用重叠模式
+        overlap_limit: 重叠文本的最大字符数
     """
     if languages is None:
         languages = ['ch_sim', 'en']  # 默认支持中文和英文
-    parser = DocumentParser(language_list=languages, chunk_size=chunk_size, overlap=overlap)
+    parser = DocumentParser(language_list=languages, chunk_size=chunk_size, overlap=overlap,
+                            overlap_limit=overlap_limit)
     segments = parser.parse(file_path)
     return segments
 
@@ -566,7 +623,7 @@ def save_segments(segments, output_path):
 
 # 创建Flask应用
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 限制上传大小为50MB
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 限制上传大小为50MB
 UPLOAD_FOLDER = tempfile.mkdtemp()
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
@@ -591,6 +648,7 @@ def upload_files():
     languages = request.form.get('languages', 'ch_sim,en').split(',')
     chunk_size = int(request.form.get('chunk_size', 1000))
     overlap = request.form.get('overlap', 'true').lower() == 'true'
+    overlap_limit = int(request.form.get('overlap_limit', 200))  # 新增：获取重叠字数上限
 
     saved_files = []
     try:
@@ -607,7 +665,8 @@ def upload_files():
             saved_files,
             languages=languages,
             chunk_size=chunk_size,
-            overlap=overlap
+            overlap=overlap,
+            overlap_limit=overlap_limit  # 传递重叠字数上限
         )
 
         # 清理文件
@@ -649,6 +708,7 @@ def api_process():
     languages = request.form.get('languages', 'ch_sim,en').split(',')
     chunk_size = int(request.form.get('chunk_size', 1000))
     overlap = request.form.get('overlap', 'true').lower() == 'true'
+    overlap_limit = int(request.form.get('overlap_limit', 200))  # 新增：获取重叠字数上限
 
     saved_files = []
     try:
@@ -665,7 +725,8 @@ def api_process():
             saved_files,
             languages=languages,
             chunk_size=chunk_size,
-            overlap=overlap
+            overlap=overlap,
+            overlap_limit=overlap_limit  # 传递重叠字数上限
         )
 
         # 清理文件
@@ -735,6 +796,8 @@ def main():
                                help='每个段落的最大字符数')
     parser_single.add_argument('--no-overlap', action='store_true',
                                help='禁用段落重叠模式（默认启用重叠）')
+    parser_single.add_argument('--overlap_limit', type=int, default=200,
+                               help='重叠文本的最大字符数')
 
     # 处理多个文件的子命令
     parser_multi = subparsers.add_parser('process_multiple', help='处理多个文件')
@@ -746,6 +809,8 @@ def main():
                               help='每个段落的最大字符数')
     parser_multi.add_argument('--no-overlap', action='store_true',
                               help='禁用段落重叠模式（默认启用重叠）')
+    parser_multi.add_argument('--overlap_limit', type=int, default=200,
+                              help='重叠文本的最大字符数')
 
     # 启动Web服务器的子命令
     parser_server = subparsers.add_parser('server', help='启动Web服务器')
@@ -763,7 +828,8 @@ def main():
             parser = DocumentParser(
                 language_list=args.languages,
                 chunk_size=args.chunk_size,
-                overlap=not args.no_overlap
+                overlap=not args.no_overlap,
+                overlap_limit=args.overlap_limit
             )
 
             results = parser.parse(args.file_path)
@@ -785,7 +851,8 @@ def main():
                 args.file_paths,
                 languages=args.languages,
                 chunk_size=args.chunk_size,
-                overlap=not args.no_overlap
+                overlap=not args.no_overlap,
+                overlap_limit=args.overlap_limit
             )
 
             for file_path, segments in results.items():
@@ -861,6 +928,10 @@ def main():
                         <div class="form-group">
                             <label for="overlap">启用重叠:</label>
                             <input type="checkbox" id="overlap" name="overlap" checked>
+                        </div>
+                        <div class="form-group">
+                            <label for="overlap_limit">重叠字数上限:</label>
+                            <input type="number" id="overlap_limit" name="overlap_limit" value="200">
                         </div>
                         <button type="submit">处理文件</button>
                     </form>
