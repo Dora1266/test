@@ -922,7 +922,7 @@ def main():
                             <input type="text" id="languages" name="languages" value="ch_sim,en">
                         </div>
                         <div class="form-group">
-                            <label for="chunk_size">段落大小:</label>
+                            <label for="chunk_size">最大段落:</label>
                             <input type="number" id="chunk_size" name="chunk_size" value="1000">
                         </div>
                         <div class="form-group">
